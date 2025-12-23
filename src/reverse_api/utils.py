@@ -1,8 +1,52 @@
 """Utility functions for run ID generation and path management."""
 
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+
+def generate_folder_name(prompt: str) -> str:
+    """Generate a clean folder name from a prompt using Claude Haiku.
+    
+    Uses Anthropic's fastest model to quickly generate a short, descriptive name.
+    Falls back to simple slugification if API call fails.
+    """
+    try:
+        import anthropic
+        
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-4-5-haiku-latest",
+            max_tokens=50,
+            messages=[{
+                "role": "user",
+                "content": f"Generate a short folder name (1-3 words, lowercase, underscores) for this task: {prompt}\n\nRespond with ONLY the folder name, nothing else. Example: apple_jobs_api"
+            }]
+        )
+        
+        name = response.content[0].text.strip().lower()
+        # Clean up the name to be filesystem-safe
+        name = re.sub(r'[^a-z0-9_]', '_', name)
+        name = re.sub(r'_+', '_', name)  # Collapse multiple underscores
+        name = name.strip('_')[:50]  # Limit length
+        
+        if name:
+            return name
+    except Exception:
+        pass
+    
+    # Fallback: simple slugify
+    return _slugify(prompt)
+
+
+def _slugify(text: str) -> str:
+    """Simple slugify fallback - converts text to a filesystem-safe name."""
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9\s]', '', text)
+    text = re.sub(r'\s+', '_', text)
+    words = text.split('_')[:3]  # Take first 3 words
+    return '_'.join(words)[:50]
 
 
 def generate_run_id() -> str:
@@ -15,18 +59,52 @@ def get_project_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
-def get_har_dir(run_id: str) -> Path:
+def get_app_dir() -> Path:
+    """Get the central application data directory."""
+    app_dir = Path.home() / ".reverse-api"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir
+
+
+def get_config_path() -> Path:
+    """Get the path to the config file."""
+    return get_app_dir() / "config.json"
+
+
+def get_history_path() -> Path:
+    """Get the path to the history file."""
+    return get_app_dir() / "history.json"
+
+
+def get_base_output_dir(output_dir: str | None = None) -> Path:
+    """Get the base directory for outputs (HARs and scripts)."""
+    if output_dir:
+        return Path(output_dir)
+    return get_app_dir() / "runs"
+
+
+def get_har_dir(run_id: str, output_dir: str | None = None) -> Path:
     """Get the HAR directory for a specific run."""
-    har_dir = get_project_root() / "har" / run_id
+    base_dir = get_base_output_dir(output_dir)
+    har_dir = base_dir / "har" / run_id
     har_dir.mkdir(parents=True, exist_ok=True)
     return har_dir
 
 
-def get_scripts_dir(run_id: str) -> Path:
+def get_scripts_dir(run_id: str, output_dir: str | None = None) -> Path:
     """Get the scripts directory for a specific run."""
-    scripts_dir = get_project_root() / "scripts" / run_id
+    base_dir = get_base_output_dir(output_dir)
+    scripts_dir = base_dir / "scripts" / run_id
     scripts_dir.mkdir(parents=True, exist_ok=True)
     return scripts_dir
+
+
+def get_messages_path(run_id: str, output_dir: str | None = None) -> Path:
+    """Get the messages file path for a specific run."""
+    base_dir = get_base_output_dir(output_dir)
+    messages_dir = base_dir / "messages"
+    messages_dir.mkdir(parents=True, exist_ok=True)
+    return messages_dir / f"{run_id}.jsonl"
 
 
 def get_timestamp() -> str:

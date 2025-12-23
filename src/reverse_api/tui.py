@@ -5,36 +5,45 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich.box import ROUNDED, MINIMAL, HEAVY
+from rich.box import ROUNDED, MINIMAL, HEAVY, DOUBLE_EDGE
 from rich.padding import Padding
 from rich.rule import Rule
+from rich.align import Align
+from rich.columns import Columns
+
+# Theme configuration
+THEME_PRIMARY = "#ff5f50"  # Coral Red
+THEME_SECONDARY = "white"
+THEME_DIM = "#555555"
+THEME_SUCCESS = "#ff5f50"
+THEME_ERROR = "bold white on #ff5f50"
 
 
-# Tool icons for visual clarity
+# Tool icons for visual clarity (minimalist text)
 TOOL_ICONS = {
-    "Read": "📖",
-    "Write": "✏️",
-    "Edit": "📝",
-    "Bash": "💻",
-    "Glob": "🔍",
-    "Grep": "🔎",
-    "WebSearch": "🌐",
-    "WebFetch": "🌍",
-    "Task": "📋",
-    "default": "🔧",
+    "Read": "rd",
+    "Write": "wr",
+    "Edit": "ed",
+    "Bash": "sh",
+    "Glob": "ls",
+    "Grep": "gp",
+    "WebSearch": "ws",
+    "WebFetch": "wf",
+    "Task": "tk",
+    "default": "> ",
 }
 
-# Tool colors
+# Tool colors (minimalist)
 TOOL_COLORS = {
-    "Read": "blue",
-    "Write": "green",
-    "Edit": "yellow",
-    "Bash": "magenta",
-    "Glob": "cyan",
-    "Grep": "cyan",
-    "WebSearch": "bright_blue",
-    "WebFetch": "bright_blue",
-    "default": "white",
+    "Read": THEME_DIM,
+    "Write": THEME_DIM,
+    "Edit": THEME_DIM,
+    "Bash": THEME_DIM,
+    "Glob": THEME_DIM,
+    "Grep": THEME_DIM,
+    "WebSearch": THEME_DIM,
+    "WebFetch": THEME_DIM,
+    "default": THEME_DIM,
 }
 
 
@@ -49,28 +58,16 @@ class ClaudeUI:
     
     def header(self, run_id: str, prompt: str, model: Optional[str] = None) -> None:
         """Display the session header."""
-        # Create a clean header table
-        table = Table(show_header=False, box=None, padding=(0, 1))
-        table.add_column("key", style="dim", width=12)
-        table.add_column("value")
-        
-        table.add_row("Run ID", f"[yellow]{run_id}[/yellow]")
-        if model:
-            table.add_row("Model", f"[green]{model}[/green]")
-        table.add_row("Task", f"[white]{prompt}[/white]")
-        
         self.console.print()
-        self.console.print(Panel(
-            table,
-            title="[bold cyan]🔍 Reverse API Analysis[/bold cyan]",
-            border_style="cyan",
-            box=ROUNDED,
-        ))
+        self.console.print(f" [white]reverse-api[/white] [dim]v0.1.0[/dim]")
+        self.console.print(f" [dim]━[/dim] [white]{run_id}[/white]")
+        self.console.print(f" [dim]model[/dim] [white]{model or '---'}[/white]")
+        self.console.print(f" [{THEME_PRIMARY}]task[/{THEME_PRIMARY}]   [white]{prompt}[/white]")
+        self.console.print()
     
     def start_analysis(self) -> None:
         """Display analysis start message."""
-        self.console.print()
-        self.console.print(Rule("[bold]Claude is analyzing...[/bold]", style="dim"))
+        self.console.print(f" [dim]decoding starting...[/dim]")
         self.console.print()
     
     def tool_start(self, tool_name: str, tool_input: dict) -> None:
@@ -79,20 +76,29 @@ class ClaudeUI:
         self._tools_used.append(tool_name)
         
         icon = TOOL_ICONS.get(tool_name, TOOL_ICONS["default"])
-        color = TOOL_COLORS.get(tool_name, TOOL_COLORS["default"])
         
         # Build input summary
         input_summary = self._summarize_input(tool_name, tool_input)
         
         # Compact single-line format
         self.console.print(
-            f"  [{color}]●[/{color}] {icon} [bold {color}]{tool_name:12}[/bold {color}] {input_summary}"
+            f"  [dim]>[/dim] {icon} [white]{tool_name.lower():8}[/white] {input_summary}"
         )
     
-    def tool_result(self, tool_name: str, is_error: bool = False) -> None:
-        """Display when a tool completes (only show on error)."""
+    def tool_result(self, tool_name: str, is_error: bool = False, output: Optional[str] = None) -> None:
+        """Display when a tool completes."""
         if is_error:
-            self.console.print(f"  [red]✗ {tool_name} failed[/red]")
+            self.console.print(f"  [dim]![/dim] [red]{tool_name.lower()} failed[/red]")
+        elif tool_name == "Bash" and output and self.verbose:
+            # Display bash output
+            output_str = str(output).strip()
+            if output_str:
+                output_lines = output_str.split('\n')
+                max_lines = 30
+                for line in output_lines[:max_lines]:
+                    self.console.print(f"  [dim]│[/dim] [dim]{line}[/dim]")
+                if len(output_lines) > max_lines:
+                    self.console.print(f"  [dim]│[/dim] [dim]... ({len(output_lines) - max_lines} more lines)[/dim]")
     
     def thinking(self, text: str, max_length: int = 100) -> None:
         """Display Claude's thinking/response text."""
@@ -108,7 +114,7 @@ class ClaudeUI:
         if len(text) > max_length:
             display_text += "..."
         
-        self.console.print(f"  [dim]→ {display_text}[/dim]")
+        self.console.print(f"  [dim].. {display_text}[/dim]")
     
     def progress(self, message: str) -> None:
         """Display a progress message."""
@@ -117,24 +123,14 @@ class ClaudeUI:
     def success(self, script_path: str) -> None:
         """Display success message with generated script path."""
         self.console.print()
-        self.console.print(Rule(style="green"))
-        
-        # Summary
-        summary = Text()
-        summary.append("✨ ", style="bold")
-        summary.append("Analysis Complete\n\n", style="bold green")
-        summary.append(f"   Tools: ", style="dim")
-        summary.append(f"{self._tool_count}\n", style="white")
-        summary.append(f"   Script: ", style="dim")
-        summary.append(f"{script_path}", style="cyan underline")
-        
-        self.console.print(summary)
+        self.console.print(f" [dim]decoding complete[/dim]")
+        self.console.print(f" [white]{script_path}[/white]")
         self.console.print()
     
     def error(self, message: str) -> None:
         """Display error message."""
         self.console.print()
-        self.console.print(f"[bold red]✗ Error:[/bold red] {message}")
+        self.console.print(f" [dim]![/dim] [red]error:[/red] {message}")
     
     def _summarize_input(self, tool_name: str, tool_input: dict) -> str:
         """Create a brief summary of tool input."""
@@ -172,7 +168,34 @@ class ClaudeUI:
 def get_model_choices() -> list[dict]:
     """Get available model choices for questionary."""
     return [
-        {"name": "Claude Sonnet (default, balanced)", "value": "sonnet"},
-        {"name": "Claude Opus (most capable)", "value": "opus"},
-        {"name": "Claude Haiku (fastest)", "value": "haiku"},
+        {"name": "Sonnet 4.5 [Balanced]", "value": "claude-sonnet-4-5"},
+        {"name": "Opus 4.5 [Power]", "value": "claude-opus-4-5"},
+        {"name": "Haiku 4.5 [Speed]", "value": "claude-haiku-4-5"},
     ]
+
+
+def display_banner(console: Console):
+    """Display ultra-minimalist banner."""
+    console.print()
+    console.print(f"  [bold white]reverse-api[/bold white]")
+    console.print(f"  [bold {THEME_PRIMARY}]━━[/bold {THEME_PRIMARY}]")
+    console.print()
+    console.print(f"  [dim white]AI agents for API reverse engineering.[/dim white]")
+    console.print()
+
+
+def display_footer(console: Console):
+    """Display minimalist footer."""
+    from datetime import datetime
+    time_str = datetime.now().strftime("%H:%M")
+    
+    footer = Text()
+    footer.append("\n v0.1.0 ", style=THEME_DIM)
+    footer.append(" LOCAL ", style=THEME_DIM)
+    footer.append(f" {time_str} ", style=THEME_DIM)
+    footer.append(" VIA CLI ", style=THEME_DIM)
+    footer.append(" " * 30)
+    footer.append(" OPERATIONAL ", style=f"bold #44bb44")
+    
+    console.print(footer)
+    console.print()

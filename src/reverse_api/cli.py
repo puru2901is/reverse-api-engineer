@@ -1,15 +1,58 @@
-"""CLI for reverse-api package."""
+import sys
+from pathlib import Path
+import json
 
 import click
 import questionary
+from questionary import Choice
+from prompt_toolkit.completion import WordCompleter
 from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from rich.box import MINIMAL, ROUNDED
 
 from .browser import ManualBrowser
-from .utils import generate_run_id
-from .tui import get_model_choices
+from .utils import (
+    generate_run_id,
+    generate_folder_name,
+    get_config_path,
+    get_history_path,
+    get_har_dir,
+    get_scripts_dir,
+    get_timestamp,
+)
+from .tui import (
+    get_model_choices,
+    display_banner,
+    display_footer,
+    THEME_PRIMARY,
+    THEME_SECONDARY,
+    THEME_DIM,
+    THEME_SUCCESS,
+    THEME_ERROR,
+)
+from .config import ConfigManager
+from .session import SessionManager
+from .engineer import run_reverse_engineering
+from .messages import MessageStore
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style as PtStyle
+from prompt_toolkit.formatted_text import HTML
 
 
 console = Console()
+config_manager = ConfigManager(get_config_path())
+session_manager = SessionManager(get_history_path())
+
+# Mode definitions
+MODES = ["manual", "engineer"]
+MODE_DESCRIPTIONS = {
+    "manual": "full pipeline",
+    "engineer": "reverse engineer only",
+}
 
 
 def prompt_interactive_options(
@@ -17,43 +60,95 @@ def prompt_interactive_options(
     url: str | None = None,
     reverse_engineer: bool | None = None,
     model: str | None = None,
+    current_mode: str = "manual",
 ) -> dict:
-    """Prompt user for essential options interactively (minimal prompts)."""
-    console.print("\n[bold cyan]🔍 Reverse API[/bold cyan]\n")
+    """Prompt user for essential options interactively (Browgents style).
     
-    # Only ask for the essential: prompt description
+    Shift+Tab cycles through modes: manual ↔ engineer
+    """
+    
+    # Slash command completer
+    command_completer = WordCompleter([
+        "/settings", "/history", "/messages", "/help", "/exit", "/quit", "/commands"
+    ], ignore_case=True)
+    
+    # Track mode state (mutable container for closure)
+    mode_state = {"mode": current_mode, "mode_index": MODES.index(current_mode)}
+    
+    # Create key bindings for mode cycling
+    kb = KeyBindings()
+    
+    @kb.add("s-tab")  # Shift+Tab
+    def cycle_mode(event):
+        """Cycle to next mode."""
+        mode_state["mode_index"] = (mode_state["mode_index"] + 1) % len(MODES)
+        mode_state["mode"] = MODES[mode_state["mode_index"]]
+        # Force prompt refresh by invalidating the app
+        event.app.invalidate()
+    
+    def get_prompt():
+        """Generate prompt with current mode indicator."""
+        mode = mode_state["mode"]
+        mode_color = THEME_PRIMARY if mode == "manual" else THEME_DIM
+        return HTML(f'<style fg="{mode_color}">[{mode}]</style> <style fg="{THEME_PRIMARY}" bold="true">&gt;</style> ')
+    
     if prompt is None:
-        prompt = questionary.text(
-            "What APIs do you want to capture?",
-            instruction="(e.g., 'login flow for example.com')",
-        ).ask()
+        pt_style = PtStyle.from_dict({
+            "prompt": f"{THEME_PRIMARY} bold",
+            "": THEME_SECONDARY,
+        })
+
+        session = PromptSession(
+            message=get_prompt,  # Dynamic prompt function
+            completer=command_completer,
+            style=pt_style,
+            key_bindings=kb,
+        )
+
+        prompt = session.prompt()
     
-    if not prompt:
+    if prompt is None:  # Handle Ctrl+D or Ctrl+C if not caught
         raise click.Abort()
+        
+    prompt = prompt.strip()
+    if not prompt:
+        return {"command": "/empty", "mode": mode_state["mode"]}
+
+    if prompt.startswith("/"):
+        return {"command": prompt.lower(), "mode": mode_state["mode"]}
     
-    # Starting URL (optional)
+    # Return mode in all cases
+    result_mode = mode_state["mode"]
+    
+    # Engineer mode: prompt is the run_id
+    if result_mode == "engineer":
+        return {
+            "mode": result_mode,
+            "run_id": prompt,
+            "model": model or config_manager.get("model", "claude-sonnet-4-5"),
+        }
+    
+    # Manual mode: need URL
     if url is None:
         url = questionary.text(
-            "Starting URL:",
-            instruction="(press Enter to skip)",
-            default="",
+            " > url",
+            instruction="(Enter for none)",
+            qmark="",
+            style=questionary.Style([
+                ('question', f'fg:{THEME_SECONDARY}'),
+                ('instruction', f'fg:{THEME_DIM} italic'),
+            ])
         ).ask()
     
-    # Ask if they want to reverse engineer immediately
-    if reverse_engineer is False: # If True, they already specified it via -r
-        reverse_engineer = questionary.confirm(
-            "Run reverse engineering (Claude) immediately after capture?",
-            default=True,
-        ).ask()
+    # Use settings defaults for the rest
+    if reverse_engineer is None:
+        reverse_engineer = True
     
-    if model is None and reverse_engineer:
-        model = questionary.select(
-            "Select Claude model:",
-            choices=["sonnet", "opus", "haiku"],
-            default="sonnet",
-        ).ask()
+    if model is None:
+        model = config_manager.get("model", "claude-sonnet-4-5")
     
     return {
+        "mode": result_mode,
         "prompt": prompt,
         "url": url if url else None,
         "reverse_engineer": reverse_engineer,
@@ -67,55 +162,252 @@ def prompt_interactive_options(
 def main(ctx: click.Context):
     """Reverse API - Capture browser traffic for API reverse engineering."""
     if ctx.invoked_subcommand is None:
-        ctx.invoke(manual)
+        repl_loop()
+
+
+def repl_loop():
+    """Main interactive loop for the CLI."""
+    display_banner(console)
+    console.print(f"  [dim]shift+tab to cycle modes: manual | engineer[/dim]")
+    display_footer(console)
+    
+    current_mode = "manual"
+
+    while True:
+        try:
+            options = prompt_interactive_options(current_mode=current_mode)
+            
+            # Update current mode for next iteration
+            current_mode = options.get("mode", "manual")
+            
+            if "command" in options:
+                cmd = options["command"]
+                if cmd == "/empty":
+                    continue
+                if cmd == "/exit" or cmd == "/quit":
+                    return  # Exit the loop and return to main
+                elif cmd == "/settings":
+                    handle_settings()
+                elif cmd == "/history":
+                    handle_history()
+                elif cmd == "/help" or cmd == "/commands":
+                    handle_help()
+                elif cmd.startswith("/messages"):
+                    parts = cmd.split(maxsplit=1)
+                    if len(parts) > 1:
+                        handle_messages(parts[1].strip())
+                    else:
+                        console.print(f" [dim]![/dim] [red]usage:[/red] /messages <run_id>")
+                else:
+                    console.print(f" [dim]![/dim] [red]unknown command:[/red] {cmd}")
+                continue
+            
+            mode = options.get("mode", "manual")
+            
+            # Handle different modes
+            if mode == "engineer":
+                # Engineer mode: only run reverse engineering on existing run_id
+                run_id = options.get("run_id")
+                if not run_id:
+                    console.print(f" [dim]![/dim] [red]error:[/red] enter a run_id to reverse engineer")
+                    continue
+                run_engineer(run_id, model=options.get("model"))
+                continue
+            
+            # Manual or Debug mode: run browser capture
+            run_manual_capture(
+                prompt=options["prompt"],
+                url=options["url"],
+                reverse_engineer=options["reverse_engineer"],
+                model=options["model"],
+            )
+            
+        except (click.Abort, KeyboardInterrupt):
+            console.print(f"\n [dim]terminated[/dim]")
+            return
+        except Exception as e:
+            console.print(f" [dim]![/dim] [red]error:[/red] {e}")
+
+
+def handle_settings():
+    """Display and manage settings."""
+    console.print()
+    for k, v in config_manager.config.items():
+        console.print(f" [dim]>[/dim] {k:25} [white]{v}[/white]")
+    
+    action = questionary.select(
+        "",
+        choices=[
+            Choice(title="> change model", value="model"),
+            Choice(title="> output directory", value="output_dir"),
+            Choice(title="> back", value="back"),
+        ],
+        pointer="",
+        qmark="",
+        style=questionary.Style([
+            ('highlighted', f'fg:{THEME_PRIMARY} bold'),
+            ('selected', 'fg:white'),
+        ])
+    ).ask()
+    
+    if action is None or action == "back":
+        return
+
+    if action == "model":
+        model_choices = [Choice(title=f"> {c['name'].lower()}", value=c['value']) for c in get_model_choices()]
+        model_choices.append(Choice(title="> back", value="back"))
+        model = questionary.select(
+            "",
+            choices=model_choices,
+            pointer="",
+            qmark="",
+            style=questionary.Style([
+                ('highlighted', f'fg:{THEME_PRIMARY} bold'),
+            ])
+        ).ask()
+        if model and model != "back":
+            config_manager.set("model", model)
+            console.print(f" [dim]updated[/dim] {model}\n")
+    
+    elif action == "output_dir":
+        current = config_manager.get("output_dir")
+        new_dir = questionary.text(
+            f" > output directory",
+            default=current or "",
+            instruction="(Enter for default ~/.reverse-api/runs)",
+            qmark="",
+            style=questionary.Style([
+                ('question', f'fg:{THEME_SECONDARY}'),
+                ('instruction', f'fg:{THEME_DIM} italic'),
+            ])
+        ).ask()
+        if new_dir is not None:
+            config_manager.set("output_dir", new_dir if new_dir.strip() else None)
+            console.print(f" [dim]updated[/dim] output directory\n")
+
+
+def handle_history():
+    """Display history of runs."""
+    history = session_manager.get_history(limit=15)
+    if not history:
+        console.print(f" [dim]> no logs found[/dim]")
+        return
+    
+    choices = []
+    for run in history:
+        cost = run.get("usage", {}).get("estimated_cost_usd", 0)
+        cost_str = f"${cost:.3f}" if cost > 0 else "-"
+        title = f"> {run['run_id']:12}  {run['prompt'][:40]:40}  {cost_str:>8}"
+        choices.append(Choice(title=title, value=run['run_id']))
+    
+    choices.append(Choice(title="> back", value="back"))
+    
+    run_id = questionary.select(
+        "",
+        choices=choices,
+        pointer="",
+        qmark="",
+        style=questionary.Style([
+            ('highlighted', f'fg:{THEME_PRIMARY} bold'),
+            ('selected', 'fg:white'),
+        ])
+    ).ask()
+    
+    if not run_id or run_id == "back":
+        return
+    
+    run = session_manager.get_run(run_id)
+    if run:
+        console.print(Panel(json.dumps(run, indent=2), border_style=THEME_DIM))
+        if questionary.confirm(" > recode?").ask():
+            model = run.get("model") or config_manager.get("model", "claude-sonnet-4-5")
+            run_engineer(run_id, model=model)
+    else:
+        console.print(f" [dim]> not found[/dim]")
+
+
+def handle_help():
+    """Show help for slash commands."""
+    console.print()
+    console.print(f" [white]commands[/white]")
+    console.print(f" [dim]>[/dim] /settings   [dim]system[/dim]")
+    console.print(f" [dim]>[/dim] /history    [dim]logs[/dim]")
+    console.print(f" [dim]>[/dim] /messages   [dim]view run messages[/dim]")
+    console.print(f" [dim]>[/dim] /help       [dim]help[/dim]")
+    console.print(f" [dim]>[/dim] /exit       [dim]quit[/dim]")
+    console.print()
+    console.print(f" [white]modes[/white] [dim](shift+tab to cycle)[/dim]")
+    console.print(f" [dim]>[/dim] manual      [dim]full pipeline: browser + reverse engineering[/dim]")
+    console.print(f" [dim]>[/dim] engineer    [dim]reverse engineer only (enter run_id)[/dim]")
+    console.print()
+
+
+def handle_messages(run_id: str):
+    """Display messages from a previous run."""
+    store = MessageStore(run_id)
+    messages = store.load()
+    
+    if not messages:
+        console.print(f" [dim]>[/dim] [red]no messages found for run:[/red] {run_id}")
+        return
+    
+    console.print()
+    console.print(f" [white]messages for {run_id}[/white]")
+    console.print()
+    
+    for msg in messages:
+        msg_type = msg.get("type", "unknown")
+        content = msg.get("content", "")
+        timestamp = msg.get("timestamp", "")[:19]  # Truncate to datetime
+        
+        if msg_type == "prompt":
+            console.print(f" [dim]{timestamp}[/dim] [white]prompt[/white]")
+            # Show first 200 chars of prompt
+            display = str(content)[:200]
+            if len(str(content)) > 200:
+                display += "..."
+            console.print(f"   [dim]{display}[/dim]")
+        elif msg_type == "tool_start":
+            name = content.get("name", "tool")
+            console.print(f" [dim]{timestamp}[/dim] [white]{name.lower()}[/white]")
+        elif msg_type == "tool_result":
+            name = content.get("name", "tool")
+            is_error = content.get("is_error", False)
+            status = "[red]error[/red]" if is_error else "[dim]ok[/dim]"
+            console.print(f" [dim]{timestamp}[/dim]   {status}")
+        elif msg_type == "thinking":
+            display = str(content)[:100].replace("\\n", " ")
+            if len(str(content)) > 100:
+                display += "..."
+            console.print(f" [dim]{timestamp}  .. {display}[/dim]")
+        elif msg_type == "error":
+            console.print(f" [dim]{timestamp}[/dim] [red]error: {content}[/red]")
+        elif msg_type == "result":
+            console.print(f" [dim]{timestamp}[/dim] [white]complete[/white]")
+            if isinstance(content, dict):
+                script_path = content.get("script_path", "")
+                if script_path:
+                    console.print(f"   [dim]{script_path}[/dim]")
+    
+    console.print()
+
 
 
 @main.command()
-@click.option(
-    "--prompt", "-p",
-    default=None,
-    help="Description of what APIs you want to capture. If omitted, enters interactive mode.",
-)
-@click.option(
-    "--url", "-u",
-    default=None,
-    help="Optional starting URL to navigate to.",
-)
-@click.option(
-    "--reverse-engineer", "-r",
-    is_flag=True,
-    default=False,
-    help="Automatically reverse engineer APIs using Claude after capture.",
-)
-@click.option(
-    "--model", "-m",
-    type=click.Choice(["sonnet", "opus", "haiku"]),
-    default=None,
-    help="Claude model to use for reverse engineering.",
-)
-@click.option(
-    "--instructions", "-i",
-    default=None,
-    help="Additional instructions for Claude when reverse engineering.",
-)
-def manual(
-    prompt: str | None,
-    url: str | None,
-    reverse_engineer: bool,
-    model: str | None,
-    instructions: str | None,
-):
-    """Start a manual browser session with HAR recording.
+@click.option("--prompt", "-p", default=None, help="Capture description.")
+@click.option("--url", "-u", default=None, help="Starting URL.")
+@click.option("--reverse-engineer/--no-engineer", "reverse_engineer", default=True, help="Auto-run Claude.")
+@click.option("--model", "-m", type=click.Choice(["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]), default=None)
+@click.option("--output-dir", "-o", default=None, help="Custom output directory.")
+def manual(prompt, url, reverse_engineer, model, output_dir):
+    """Start a manual browser session."""
+    run_manual_capture(prompt, url, reverse_engineer, model, output_dir)
+
+
+def run_manual_capture(prompt=None, url=None, reverse_engineer=True, model=None, output_dir=None):
+    """Shared logic for manual capture."""
+    output_dir = output_dir or config_manager.get("output_dir")
     
-    Opens a Chromium browser where you can interact with websites.
-    All network traffic is recorded to a HAR file for later analysis.
-    Close the browser or press Ctrl+C when done.
-    
-    If --prompt is omitted, enters interactive mode.
-    
-    Use -r to auto-generate a Python API client after capture.
-    """
-    # Interactive mode if no prompt provided
     if prompt is None:
         options = prompt_interactive_options(
             prompt=prompt,
@@ -123,77 +415,115 @@ def manual(
             reverse_engineer=reverse_engineer,
             model=model,
         )
+        if "command" in options:
+            return # Should not happen from here
         prompt = options["prompt"]
         url = options["url"]
         reverse_engineer = options["reverse_engineer"]
         model = options["model"]
-    
+
     run_id = generate_run_id()
-    browser = ManualBrowser(run_id=run_id, prompt=prompt)
+    timestamp = get_timestamp()
+    
+    # Record initial session
+    session_manager.add_run(
+        run_id=run_id,
+        prompt=prompt,
+        timestamp=timestamp,
+        url=url,
+        model=model,
+        paths={
+            "har_dir": str(get_har_dir(run_id, output_dir))
+        }
+    )
+
+    browser = ManualBrowser(run_id=run_id, prompt=prompt, output_dir=output_dir)
     har_path = browser.start(start_url=url)
     
     if reverse_engineer:
-        from .engineer import run_reverse_engineering
-        script_path = run_reverse_engineering(
+        result = run_engineer(
             run_id=run_id,
             har_path=har_path,
             prompt=prompt,
             model=model,
-            additional_instructions=instructions,
+            output_dir=output_dir
         )
-        if script_path:
-            console.print(f"\n[green]✓[/green] Generated API script: [cyan]{script_path}[/cyan]")
+        if result:
+            session_manager.update_run(
+                run_id=run_id,
+                usage=result.get("usage", {}),
+                paths={"script_path": result.get("script_path")}
+            )
 
 
 @main.command()
 @click.argument("run_id")
-@click.option(
-    "--model", "-m",
-    type=click.Choice(["sonnet", "opus", "haiku"]),
-    default=None,
-    help="Claude model to use for reverse engineering.",
-)
-@click.option(
-    "--instructions", "-i",
-    default=None,
-    help="Additional instructions for Claude.",
-)
-def engineer(run_id: str, model: str | None, instructions: str | None):
-    """Reverse engineer APIs from a previous capture.
-    
-    Analyzes the HAR file from a previous run and generates
-    a Python API client script using Claude.
-    """
-    import json
-    from pathlib import Path
-    from .utils import get_har_dir
-    from .engineer import run_reverse_engineering
-    
-    har_dir = get_har_dir(run_id)
-    har_path = har_dir / "recording.har"
-    metadata_path = har_dir / "metadata.json"
-    
-    if not har_path.exists():
-        console.print(f"[red]Error:[/red] HAR file not found for run ID: {run_id}")
-        console.print(f"[dim]Expected path: {har_path}[/dim]")
-        return
-    
-    # Load prompt from metadata if available
-    prompt = "Reverse engineer the captured APIs"
-    if metadata_path.exists():
-        with open(metadata_path) as f:
-            metadata = json.load(f)
-            prompt = metadata.get("prompt", prompt)
-    
-    script_path = run_reverse_engineering(
+@click.option("--model", "-m", type=click.Choice(["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"]), default=None)
+@click.option("--output-dir", "-o", default=None, help="Custom output directory.")
+def engineer(run_id, model, output_dir):
+    """Run reverse engineering on a previous run."""
+    run_engineer(run_id, model=model, output_dir=output_dir)
+
+
+def run_engineer(run_id, har_path=None, prompt=None, model=None, output_dir=None):
+    """Shared logic for reverse engineering."""
+    if not har_path or not prompt:
+        # Load from history if possible
+        run_data = session_manager.get_run(run_id)
+        if not run_data:
+            # Fallback to file search if not in history
+            har_dir = get_har_dir(run_id, output_dir)
+            har_path = har_dir / "recording.har"
+            if not har_path.exists():
+                console.print(f" [dim]![/dim] [red]not found:[/red] {run_id}")
+                return None
+            prompt = "Reverse engineer captured APIs" # Default
+        else:
+            prompt = run_data["prompt"]
+            # Detect where it was saved
+            paths = run_data.get("paths", {})
+            har_dir = Path(paths.get("har_dir", get_har_dir(run_id, None)))
+            har_path = har_dir / "recording.har"
+
+    result = run_reverse_engineering(
         run_id=run_id,
         har_path=har_path,
         prompt=prompt,
-        model=model,
-        additional_instructions=instructions,
+        model=model or config_manager.get("model", "claude-sonnet-4-5"),
+        output_dir=output_dir
     )
-    if script_path:
-        console.print(f"\n[green]✓[/green] Generated API script: [cyan]{script_path}[/cyan]")
+    
+    if result:
+        # Automatically copy scripts to current directory with a readable name
+        scripts_dir = Path(result["script_path"]).parent
+        base_name = generate_folder_name(prompt)
+        folder_name = base_name
+        local_dir = Path.cwd() / "scripts" / folder_name
+        
+        # Handle existing folder - append suffix if needed
+        counter = 2
+        while local_dir.exists():
+            folder_name = f"{base_name}_{counter}"
+            local_dir = Path.cwd() / "scripts" / folder_name
+            counter += 1
+        
+        local_dir.mkdir(parents=True, exist_ok=True)
+        
+        import shutil
+        for item in scripts_dir.iterdir():
+            if item.is_file():
+                shutil.copy2(item, local_dir / item.name)
+        
+        console.print(f" [dim]>[/dim] [white]decoding complete[/white]")
+        console.print(f" [dim]>[/dim] [white]{result['script_path']}[/white]")
+        console.print(f" [dim]>[/dim] [white]copied to ./scripts/{folder_name}[/white]\n")
+        
+        session_manager.update_run(
+            run_id=run_id,
+            usage=result.get("usage", {}),
+            paths={"script_path": result.get("script_path")}
+        )
+    return result
 
 
 if __name__ == "__main__":
