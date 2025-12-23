@@ -151,6 +151,20 @@ Generated `api_client.py` includes:
 - Error handling
 - Production-ready code
 
+## 🗺️ Roadmap
+
+### SDK Support
+Expanding support for additional SDKs and platforms:
+- **OpenCode** - Integration with OpenCode SDK
+- **Cursor Agent CLI** - Support for Cursor's agent CLI
+- **Droid** - Android SDK integration
+- **Codex** - Codex SDK support
+
+### Fully Automated Extraction
+Adding browser agent capabilities for fully automated API extraction:
+- **Stagehand** - Automated browser interaction and extraction
+- **Browser-use** - Browser automation for API discovery
+
 ## 🛠️ Development
 
 ### Setup
