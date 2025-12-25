@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-12-26
+
+### Added
+- **Stagehand Agent Support**: Added Stagehand as an alternative agent provider alongside browser-use
+  - Supports OpenAI Computer Use models (e.g., `computer-use-preview-2025-03-11`)
+  - Supports Anthropic Computer Use models (e.g., `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`, `claude-opus-4-5-20251101`)
+- **Separate Model Configurations**: Enhanced settings system with independent model configurations
+  - `claude_code_model`: Model for Claude SDK (renamed from `model`)
+  - `opencode_provider`: Provider for OpenCode SDK (e.g., "anthropic", "openai", "google")
+  - `opencode_model`: Model for OpenCode SDK
+  - `browser_use_model`: Model for browser-use agent provider
+  - `stagehand_model`: Model for stagehand agent provider
+
+### Changed
+- **Improved Settings Management**: Separated model configurations for different SDKs and agent providers
+  - Each SDK and agent provider now has its own independent model setting
+  - Settings menu updated with clearer options for each component
+- **Better Configuration Isolation**: OpenCode model settings no longer interfere with Claude SDK settings
+- **Backward Compatibility**: Automatic migration of old config files to new structure
+
+### Fixed
+- Fixed issue where OpenCode model settings were being overridden by Claude SDK model settings
+- Fixed model configuration conflicts between different SDKs and agent providers
+
 ## [0.2.0] - 2025-12-25
 
 ### Added
