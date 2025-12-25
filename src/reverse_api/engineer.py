@@ -143,7 +143,7 @@ def run_reverse_engineering(
     additional_instructions: Optional[str] = None,
     output_dir: Optional[str] = None,
     verbose: bool = True,
-    sdk: str = "opencode",
+    sdk: str = "claude",
 ) -> Optional[Dict[str, Any]]:
     """Run reverse engineering with the specified SDK.
     
